@@ -158,3 +158,31 @@ export function stopMetricsServer(): Promise<void> {
     }
   });
 }
+
+// ── Métriques liquidation (ajoutées en v3) ────────────────────
+// Les gauges suivants sont initialisés dynamiquement via setGauge()
+// hedge_margin_ratio          - Ratio de marge par pool (ex: 0.35 = 35%)
+// hedge_collateral_usd        - Collatéral disponible en USD
+// hedge_position_value_usd    - Valeur notionnelle de la position en USD
+// hedge_emergency_closes_total- Nombre de fermetures forcées
+// hedge_blocked_by_circuit_breaker - Cycles bloqués par le CB
+
+// Ces entrées sont auto-enregistrées dans HELP au premier usage.
+// On étend le tableau HELP de renderMetrics via monkey-patch propre :
+
+const LIQUIDATION_HELP: Record<string, [string, string]> = {
+  hedge_margin_ratio:                  ['gauge',   'Ratio de marge courant par pool (1 = 100%)'],
+  hedge_collateral_usd:                ['gauge',   'Collatéral disponible en USD par pool'],
+  hedge_position_value_usd:            ['gauge',   'Valeur notionnelle de la position ouverte en USD'],
+  hedge_emergency_closes_total:        ['counter', 'Nombre total de fermetures forcées d\'urgence'],
+  hedge_blocked_by_circuit_breaker:    ['counter', 'Cycles de hedging bloqués par le circuit breaker'],
+};
+
+// Injection dans les stores globaux au chargement du module
+for (const name of Object.keys(LIQUIDATION_HELP)) {
+  if (name.includes('total') || name.includes('blocked')) {
+    if (!(name in counters)) counters[name] = {};
+  } else {
+    if (!(name in gauges)) gauges[name] = {};
+  }
+}

@@ -47,6 +47,14 @@ export interface HedgingConfig {
   alertMinSeverity: AlertSeverity;
   // Slippage
   maxSlippagePct: number;
+  // Liquidation (inline pour garder un seul objet CONFIG)
+  marginWarnPct: number;
+  marginCriticalPct: number;
+  marginEmergencyPct: number;
+  marginCheckIntervalMs: number;
+  emergencyCloseEnabled: boolean;
+  circuitBreakerEnabled: boolean;
+  circuitBreakerResetPct: number;
 }
 
 // ── Pools ─────────────────────────────────────────────────────
@@ -133,4 +141,76 @@ export interface Alert {
   message: string;
   context?: Record<string, unknown>;
   timestamp: number;
+}
+
+// ── Liquidation ───────────────────────────────────────────────
+
+/**
+ * États de risque de liquidation — machine à états à sens unique vers le haut
+ * (on ne repasse pas de EMERGENCY à SAFE sans intervention manuelle).
+ *
+ * SAFE      : margin ratio au-dessus du seuil d'avertissement
+ * WARN      : margin ratio entre warn_pct et critical_pct → alerte envoyée
+ * CRITICAL  : margin ratio entre critical_pct et emergency_pct
+ *             → circuit breaker activé, plus aucun nouveau hedge autorisé
+ * EMERGENCY : margin ratio sous emergency_pct
+ *             → fermeture forcée de toutes les positions
+ */
+export type LiquidationRisk = 'SAFE' | 'WARN' | 'CRITICAL' | 'EMERGENCY';
+
+/** État de la marge pour un pool donné */
+export interface MarginState {
+  poolId: string;
+  /** Valeur totale du collatéral en USD */
+  collateralUsd: number;
+  /** Valeur notionnelle de la position ouverte en USD */
+  positionValueUsd: number;
+  /** Ratio de marge = collateral / positionValue (1 = 100%) */
+  marginRatio: number;
+  /** Ratio de liquidation estimé fourni par le protocole (si disponible) */
+  liquidationRatio: number;
+  /** Niveau de risque calculé */
+  risk: LiquidationRisk;
+  /** Timestamp du calcul */
+  timestamp: number;
+}
+
+/** Résultat d'une action de fermeture d'urgence */
+export interface EmergencyCloseResult {
+  poolId: string;
+  success: boolean;
+  digest?: string;
+  quantityClosed: number;
+  error?: string;
+}
+
+/** État du circuit breaker par pool */
+export interface CircuitBreakerState {
+  poolId: string;
+  /** true = hedging bloqué pour ce pool */
+  open: boolean;
+  /** Raison de l'ouverture */
+  reason: string;
+  /** Timestamp d'ouverture */
+  openedAt: number | null;
+  /** Nombre de cycles bloqués depuis ouverture */
+  blockedCycles: number;
+}
+
+/** Config liquidation (dans HedgingConfig) */
+export interface LiquidationConfig {
+  /** Ratio marge en % en-dessous duquel on émet un warning (ex: 30 = 30%) */
+  marginWarnPct: number;
+  /** Ratio marge en % → circuit breaker activé (ex: 20) */
+  marginCriticalPct: number;
+  /** Ratio marge en % → fermeture forcée (ex: 10) */
+  marginEmergencyPct: number;
+  /** Fréquence de vérification de la marge (ms) */
+  marginCheckIntervalMs: number;
+  /** Active la fermeture automatique d'urgence */
+  emergencyCloseEnabled: boolean;
+  /** Active le circuit breaker */
+  circuitBreakerEnabled: boolean;
+  /** Ratio de marge minimum pour réarmer le circuit breaker (ex: 40) */
+  circuitBreakerResetPct: number;
 }

@@ -180,3 +180,55 @@ export const alerts = {
     );
   },
 };
+
+// ── Alertes liquidation (ajoutées en v3) ─────────────────────
+
+export const liquidationAlerts = {
+  marginWarning(poolId: string, marginPct: number, threshold: number): Promise<void> {
+    return sendAlert(
+      'warn',
+      '⚠️ Marge faible',
+      `Pool ${poolId.slice(0, 8)} : marge à ${marginPct.toFixed(1)}% (seuil : ${threshold}%)`,
+      { poolId, marginPct: marginPct.toFixed(2), threshold }
+    );
+  },
+
+  circuitBreakerOpen(poolId: string, marginPct: number): Promise<void> {
+    return sendAlert(
+      'critical',
+      '⚡ Circuit breaker ouvert',
+      `Hedging suspendu sur pool ${poolId.slice(0, 8)} — marge ${marginPct.toFixed(1)}%`,
+      { poolId, marginPct: marginPct.toFixed(2) }
+    );
+  },
+
+  circuitBreakerReset(poolId: string, marginPct: number): Promise<void> {
+    return sendAlert(
+      'info',
+      '✅ Circuit breaker réarmé',
+      `Hedging repris sur pool ${poolId.slice(0, 8)} — marge ${marginPct.toFixed(1)}%`,
+      { poolId, marginPct: marginPct.toFixed(2) }
+    );
+  },
+
+  emergencyClose(poolId: string, marginPct: number): Promise<void> {
+    return sendAlert(
+      'critical',
+      '🚨 FERMETURE URGENCE',
+      `Fermeture forcée de toutes les positions sur pool ${poolId.slice(0, 8)} — marge ${marginPct.toFixed(1)}%`,
+      { poolId, marginPct: marginPct.toFixed(2) }
+    );
+  },
+
+  emergencyManual(poolId: string, marginPct: number): Promise<void> {
+    return sendAlert(
+      'critical',
+      '🚨 ACTION MANUELLE REQUISE',
+      `Marge ${marginPct.toFixed(1)}% sous le seuil critique sur pool ${poolId.slice(0, 8)} — fermeture automatique désactivée`,
+      { poolId, marginPct: marginPct.toFixed(2), hint: 'Fermez manuellement vos positions !' }
+    );
+  },
+};
+
+// On fusionne dans l'objet alerts existant pour rétrocompatibilité
+Object.assign(alerts, liquidationAlerts);

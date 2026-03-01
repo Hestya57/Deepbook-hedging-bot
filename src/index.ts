@@ -10,6 +10,7 @@ import { initClients, client, db, walletAddress, getWalletBalanceSui } from './u
 import { startMetricsServer, stopMetricsServer, metrics } from './utils/metrics.js';
 import { alerts }                 from './utils/alerts.js';
 import { hedgeAllPools, getErrorStats } from './core/hedging.js';
+import { checkAllPoolsMargin, resetCircuitBreakerManually } from './core/liquidation.js';
 import type { AppContext }         from './types.js';
 
 // ── Contexte global ───────────────────────────────────────────
@@ -117,22 +118,31 @@ async function main(): Promise<void> {
   // 5. Vérification initiale du solde
   await checkWalletBalance();
 
-  // 6. Premier cycle immédiat
+  // 6. Vérification initiale de la marge (avant le premier hedge)
+  await checkAllPoolsMargin(ctx);
+
+  // 7. Premier cycle immédiat de hedging
   await hedgeAllPools(ctx);
 
-  // 7. WebSocket temps-réel
+  // 8. WebSocket temps-réel
   setupWebSocket();
 
-  // 8. Polling de secours
+  // 9. Polling de secours
   setInterval(async () => {
     logger.info('[POLL] Vérification périodique');
     await hedgeAllPools(ctx);
   }, CONFIG.checkIntervalMs);
 
-  // 9. Vérification du solde toutes les 5 min
+  // 10. Surveillance de la marge (circuit breaker & liquidation)
+  setInterval(async () => {
+    logger.info('[MARGIN] Vérification des marges');
+    await checkAllPoolsMargin(ctx);
+  }, CONFIG.marginCheckIntervalMs);
+
+  // 11. Vérification du solde toutes les 5 min
   setInterval(() => { void checkWalletBalance(); }, 5 * 60_000);
 
-  // 10. Rapport d'erreurs toutes les 10 min
+  // 11. Rapport d'erreurs toutes les 10 min
   setInterval(() => {
     const stats = getErrorStats();
     if (stats.count > 0) {

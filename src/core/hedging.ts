@@ -8,6 +8,7 @@ import { logger }                         from '../utils/logger.js';
 import { metrics }                        from '../utils/metrics.js';
 import { alerts }                         from '../utils/alerts.js';
 import { computePreciseDelta }            from './delta.js';
+import { isCircuitBreakerOpen, getCircuitBreakerState } from './liquidation.js';
 
 // ── État interne ──────────────────────────────────────────────
 const deltaCache  = new Map<string, DeltaCache>();
@@ -105,6 +106,21 @@ function buildMarketOrderTx(
 // ── Hedge d'un pool ───────────────────────────────────────────
 export async function hedgePosition(poolId: string, ctx: AppContext): Promise<void> {
   const start = Date.now();
+
+  // ── Vérification circuit breaker AVANT toute action ─────
+  if (CONFIG.circuitBreakerEnabled && isCircuitBreakerOpen(poolId)) {
+    const cb = getCircuitBreakerState(poolId);
+    logger.warn('⚡ Hedge bloqué — circuit breaker ouvert', {
+      pool:          poolId.slice(0, 8),
+      reason:        cb.reason,
+      blockedCycles: cb.blockedCycles,
+      openSince:     cb.openedAt
+        ? Math.round((Date.now() - cb.openedAt) / 1000) + 's'
+        : 'inconnu',
+    });
+    metrics.incCounter('hedge_blocked_by_circuit_breaker', { pool: poolId.slice(0, 8) });
+    return;
+  }
 
   try {
     // 1. Delta précis (avec cache)

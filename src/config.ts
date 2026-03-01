@@ -65,6 +65,25 @@ export const CONFIG: HedgingConfig = {
   alertTelegramChatId: process.env.ALERT_TELEGRAM_CHAT_ID ?? '',
   alertDiscordWebhook: process.env.ALERT_DISCORD_WEBHOOK  ?? '',
   alertMinSeverity:    parseSeverity(process.env.ALERT_MIN_SEVERITY),
+
+  // Slippage
+  maxSlippagePct: Number(process.env.MAX_SLIPPAGE_PCT) || 1.0,
+
+  // ── Gestion de la liquidation ────────────────────────────
+  // Seuil d'avertissement : ratio de marge en % (ex: 30 = 30%)
+  marginWarnPct:          Number(process.env.MARGIN_WARN_PCT)           || 30,
+  // Seuil critique : circuit breaker s'active, plus de nouveau hedge
+  marginCriticalPct:      Number(process.env.MARGIN_CRITICAL_PCT)       || 20,
+  // Seuil d'urgence : fermeture forcée de toutes les positions
+  marginEmergencyPct:     Number(process.env.MARGIN_EMERGENCY_PCT)      || 10,
+  // Fréquence de vérification de la marge (ms)
+  marginCheckIntervalMs:  Number(process.env.MARGIN_CHECK_INTERVAL_MS)  || 15_000,
+  // Active la fermeture automatique en cas d'urgence
+  emergencyCloseEnabled:  process.env.EMERGENCY_CLOSE_ENABLED !== 'false',
+  // Active le circuit breaker (bloque les hedges si marge critique)
+  circuitBreakerEnabled:  process.env.CIRCUIT_BREAKER_ENABLED !== 'false',
+  // Ratio de marge minimum pour réarmer le circuit breaker
+  circuitBreakerResetPct: Number(process.env.CIRCUIT_BREAKER_RESET_PCT) || 40,
 };
 
 if (CONFIG.pools.length === 0) {

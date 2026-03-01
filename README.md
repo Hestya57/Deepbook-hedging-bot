@@ -1,4 +1,4 @@
-# Deepbook Hedging Bot v2
+# Deepbook Hedging Bot v3
 
 Bot de hedging **delta-neutral** sur [DeepBook V3](https://docs.deepbook.sui.io/) (réseau Sui).
 
@@ -11,7 +11,8 @@ Bot de hedging **delta-neutral** sur [DeepBook V3](https://docs.deepbook.sui.io/
 | 📊 Métriques Prometheus  | Endpoint `/metrics` + `/health` sur le port configurable                     |
 | 🔔 Alertes               | Telegram & Discord (démarrage, erreurs, hedge exécuté, solde faible)         |
 | 🧮 Delta précis          | Position + ordres ouverts + prix mid + vérification slippage                 |
-| 🧪 Tests automatisés     | 40+ assertions Vitest sur hedging, config, delta, keystore, alertes          |
+| 🛡️ Gestion liquidation   | Circuit breaker, fermeture d'urgence, machine à états SAFE→WARN→CRITICAL→EMERGENCY |
+| 🧪 Tests automatisés     | 60+ assertions Vitest sur hedging, config, delta, keystore, alertes, liquidation |
 
 ## Architecture
 
@@ -23,7 +24,8 @@ src/
 ├── scripts/
 │   └── create-keystore.ts  # CLI : création du keystore chiffré
 ├── core/
-│   ├── hedging.ts        # Logique de hedging, cache delta, décision
+│   ├── hedging.ts        # Logique de hedging + vérif circuit breaker
+│   ├── liquidation.ts    # Machine à états, circuit breaker, fermeture d'urgence
 │   └── delta.ts          # Calcul précis du delta (position + ordres + prix)
 └── utils/
     ├── sui.ts            # Clients Sui/DeepBook, initClients(), executeSafe(), dryRun
@@ -39,6 +41,7 @@ tests/
 ├── delta.test.ts         # Tests du calcul delta et slippage
 ├── keystore.test.ts      # Tests chiffrement/déchiffrement
 └── alerts.test.ts        # Tests du système d'alertes
+    └── liquidation.test.ts   # Tests de la gestion de liquidation
 ```
 
 ## Installation
@@ -77,6 +80,12 @@ npm run keystore:create
 | `ALERT_TELEGRAM_TOKEN` | —             | Token du bot Telegram                               |
 | `ALERT_DISCORD_WEBHOOK`| —             | URL du webhook Discord                              |
 | `ALERT_MIN_SEVERITY`   | `warn`        | Niveau minimum d'alerte (`info`/`warn`/`critical`)  |
+| `MARGIN_WARN_PCT`      | `30`          | Seuil d'avertissement de marge (%)                  |
+| `MARGIN_CRITICAL_PCT`  | `20`          | Seuil d'activation du circuit breaker (%)           |
+| `MARGIN_EMERGENCY_PCT` | `10`          | Seuil de fermeture d'urgence (%)                    |
+| `CIRCUIT_BREAKER_ENABLED` | `true`    | Active le blocage des hedges en marge critique      |
+| `EMERGENCY_CLOSE_ENABLED` | `true`    | Active la fermeture automatique d'urgence           |
+| `CIRCUIT_BREAKER_RESET_PCT` | `40`    | Seuil de réarmement du circuit breaker (hysteresis) |
 
 ## Utilisation
 
@@ -121,6 +130,11 @@ Métriques disponibles :
 | `hedge_tx_duration_ms`         | gauge   | Durée de la dernière transaction       |
 | `hedge_wallet_balance_sui`     | gauge   | Solde SUI du wallet                    |
 | `hedge_cycle_last_timestamp`   | gauge   | Timestamp du dernier cycle réussi      |
+| `hedge_margin_ratio`           | gauge   | Ratio de marge courant par pool        |
+| `hedge_collateral_usd`         | gauge   | Collatéral disponible en USD           |
+| `hedge_position_value_usd`     | gauge   | Valeur notionnelle de la position      |
+| `hedge_emergency_closes_total` | counter | Fermetures forcées d'urgence           |
+| `hedge_blocked_by_circuit_breaker` | counter | Cycles bloqués par le circuit breaker |
 
 ## ⚠️ Avertissements
 

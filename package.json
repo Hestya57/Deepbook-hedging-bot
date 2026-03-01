@@ -1,33 +1,39 @@
 {
   "name": "deepbook-hedging-bot",
-  "version": "2.0.0",
-  "description": "Bot de hedging delta-neutral sur DeepBook (Sui) — v2",
+  "version": "3.0.0",
+  "description": "Bot de hedging delta-neutral sur DeepBook (Sui) \u2014 v3 avec gestion liquidation",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build":            "tsc",
-    "start":            "node dist/index.js",
-    "dev":              "ts-node --esm src/index.ts",
-    "typecheck":        "tsc --noEmit",
-    "test":             "vitest run",
-    "test:watch":       "vitest",
-    "test:coverage":    "vitest run --coverage",
-    "keystore:create":  "node --loader ts-node/esm src/scripts/create-keystore.ts"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node --esm src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "keystore:create": "node --loader ts-node/esm src/scripts/create-keystore.ts"
   },
-  "keywords": ["sui", "deepbook", "hedging", "delta-neutral", "bot"],
+  "keywords": [
+    "sui",
+    "deepbook",
+    "hedging",
+    "delta-neutral",
+    "bot"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@mysten/deepbook-v3": "^0.28.3",
-    "@mysten/sui":         "^1.45.2",
-    "date-fns":            "^4.1.0",
-    "dotenv":              "^17.3.1"
+    "@mysten/sui": "^1.45.2",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.3.1"
   },
   "devDependencies": {
-    "@types/node":           "^25.3.3",
-    "@vitest/coverage-v8":   "^2.0.0",
-    "ts-node":               "^10.9.2",
-    "typescript":            "^5.9.3",
-    "vitest":                "^2.0.0"
+    "@types/node": "^25.3.3",
+    "@vitest/coverage-v8": "^2.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "vitest": "^2.0.0"
   }
 }

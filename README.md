@@ -1,30 +1,44 @@
-# Deepbook Hedging Bot
+# Deepbook Hedging Bot v2
 
 Bot de hedging **delta-neutral** sur [DeepBook V3](https://docs.deepbook.sui.io/) (réseau Sui).
 
-## Fonctionnement
+## Nouveautés v2
 
-Le bot surveille en continu les positions ouvertes sur un ou plusieurs pools DeepBook. Lorsque le **delta** (position nette en base) dépasse un seuil configurable, il place automatiquement un ordre de marché dans le sens opposé pour neutraliser l'exposition.
-
-```
-Delta > +threshold  →  ordre SELL
-Delta < -threshold  →  ordre BUY
-|Delta| ≤ threshold →  rien
-```
+| Amélioration             | Détail                                                                       |
+|--------------------------|------------------------------------------------------------------------------|
+| 🔐 Sécurité des clés     | Keystore chiffré AES-256-GCM (scrypt KDF) — plus de mnémonique en clair     |
+| ✅ Simulation pre-envoi   | `dryRunTransactionBlock` avant chaque transaction réelle                     |
+| 📊 Métriques Prometheus  | Endpoint `/metrics` + `/health` sur le port configurable                     |
+| 🔔 Alertes               | Telegram & Discord (démarrage, erreurs, hedge exécuté, solde faible)         |
+| 🧮 Delta précis          | Position + ordres ouverts + prix mid + vérification slippage                 |
+| 🧪 Tests automatisés     | 40+ assertions Vitest sur hedging, config, delta, keystore, alertes          |
 
 ## Architecture
 
 ```
 src/
-├── index.ts          # Point d'entrée, boucle principale, WebSocket
-├── config.ts         # Chargement et validation de la config .env
-├── types.ts          # Types TypeScript & classe HedgingError
+├── index.ts              # Point d'entrée, orchestration, WebSocket, polling
+├── config.ts             # Chargement et validation de la config .env
+├── types.ts              # Types TypeScript & HedgingError
+├── scripts/
+│   └── create-keystore.ts  # CLI : création du keystore chiffré
 ├── core/
-│   └── hedging.ts    # Logique de hedging, cache delta, décision
+│   ├── hedging.ts        # Logique de hedging, cache delta, décision
+│   └── delta.ts          # Calcul précis du delta (position + ordres + prix)
 └── utils/
-    ├── sui.ts        # Client Sui, keypair, executeSafe() avec retry
-    ├── pools.ts      # Chargement et résolution des pools DeepBook
-    └── logger.ts     # Logger structuré avec timestamp
+    ├── sui.ts            # Clients Sui/DeepBook, initClients(), executeSafe(), dryRun
+    ├── keystore.ts       # Chiffrement AES-256-GCM du mnémonique
+    ├── pools.ts          # Chargement et résolution des pools DeepBook
+    ├── metrics.ts        # Serveur HTTP Prometheus
+    ├── alerts.ts         # Alertes Telegram & Discord
+    └── logger.ts         # Logger structuré avec timestamp
+
+tests/
+├── hedging.test.ts       # Tests de la logique de décision
+├── config.test.ts        # Tests du parsing de configuration
+├── delta.test.ts         # Tests du calcul delta et slippage
+├── keystore.test.ts      # Tests chiffrement/déchiffrement
+└── alerts.test.ts        # Tests du système d'alertes
 ```
 
 ## Installation
@@ -34,23 +48,35 @@ git clone <repo>
 cd deepbook-hedging-bot
 npm install
 cp .env.example .env
-# Éditez .env avec vos valeurs (MNEMONIC, POOLS, etc.)
+# Éditez .env avec vos valeurs
 ```
 
-## Configuration
+## Configuration de la sécurité (recommandé)
 
-Voir `.env.example` pour toutes les options disponibles.
+### Keystore chiffré (production)
 
-| Variable             | Défaut     | Description                                      |
-|----------------------|-----------|--------------------------------------------------|
-| `RPC_URL`            | mainnet   | URL du nœud Sui                                  |
-| `MNEMONIC`           | —         | Phrase de 12 mots du wallet (⚠️ secret)          |
-| `POOLS`              | —         | IDs ou paires symboliques des pools              |
-| `DELTA_THRESHOLD`    | `10`      | Seuil de delta pour déclencher un hedge          |
-| `ORDER_SIZE_BASE`    | `5`       | Taille de base d'un ordre                        |
-| `LEVERAGE`           | `5`       | Multiplicateur de la taille d'ordre              |
-| `CHECK_INTERVAL_MS`  | `30000`   | Fréquence du polling de secours (ms)             |
-| `MAX_RETRIES`        | `3`       | Nombre de tentatives par transaction             |
+```bash
+# Crée un keystore.enc chiffré avec votre mnémonique
+npm run keystore:create
+
+# Supprimez ensuite MNEMONIC de votre .env
+# Ajoutez KEYSTORE_PASSWORD dans .env (ou laissez vide pour invite interactive)
+```
+
+### Variables d'environnement clés
+
+| Variable               | Défaut        | Description                                         |
+|------------------------|---------------|-----------------------------------------------------|
+| `KEYSTORE_PATH`        | `./keystore.enc` | Chemin du keystore chiffré                       |
+| `KEYSTORE_PASSWORD`    | _(invite)_    | Mot de passe (vide = invite au démarrage)           |
+| `MNEMONIC`             | —             | Fallback dev (⚠️ pas pour la production)            |
+| `DELTA_THRESHOLD`      | `10`          | Seuil de delta pour déclencher un hedge             |
+| `MAX_SLIPPAGE_PCT`     | `1.0`         | Slippage maximum accepté en %                       |
+| `METRICS_ENABLED`      | `true`        | Active le serveur Prometheus                        |
+| `METRICS_PORT`         | `9090`        | Port du serveur de métriques                        |
+| `ALERT_TELEGRAM_TOKEN` | —             | Token du bot Telegram                               |
+| `ALERT_DISCORD_WEBHOOK`| —             | URL du webhook Discord                              |
+| `ALERT_MIN_SEVERITY`   | `warn`        | Niveau minimum d'alerte (`info`/`warn`/`critical`)  |
 
 ## Utilisation
 
@@ -58,19 +84,47 @@ Voir `.env.example` pour toutes les options disponibles.
 # Compiler
 npm run build
 
-# Démarrer
+# Démarrer (production)
 npm start
 
-# Mode développement (sans compilation)
+# Mode développement
 npm run dev
 
-# Vérification TypeScript uniquement
+# Lancer les tests
+npm test
+
+# Tests avec couverture
+npm run test:coverage
+
+# Vérification TypeScript
 npm run typecheck
 ```
 
+## Métriques Prometheus
+
+Une fois le bot démarré, accédez aux métriques :
+
+```
+http://localhost:9090/metrics   # Prometheus scrape
+http://localhost:9090/health    # Health check JSON
+```
+
+Métriques disponibles :
+
+| Métrique                       | Type    | Description                            |
+|--------------------------------|---------|----------------------------------------|
+| `hedge_delta_current`          | gauge   | Delta courant par pool (unités base)   |
+| `hedge_delta_priced_usd`       | gauge   | Delta valorisé en USD                  |
+| `hedge_orders_total`           | counter | Ordres passés (labels: pool, action)   |
+| `hedge_errors_total`           | counter | Erreurs (labels: pool, code)           |
+| `hedge_consecutive_failures`   | gauge   | Échecs consécutifs courants            |
+| `hedge_tx_duration_ms`         | gauge   | Durée de la dernière transaction       |
+| `hedge_wallet_balance_sui`     | gauge   | Solde SUI du wallet                    |
+| `hedge_cycle_last_timestamp`   | gauge   | Timestamp du dernier cycle réussi      |
+
 ## ⚠️ Avertissements
 
-- Ne jamais commiter le fichier `.env` contenant votre mnémonique
-- Tester **impérativement sur testnet** avant le mainnet
-- Le levier amplifie les pertes — configurer avec prudence
-- Ce bot ne gère pas (encore) le risque de liquidation
+- Tester **impérativement sur testnet** avant le mainnet (`SUI_ENV=testnet`)
+- Le keystore chiffré doit être sauvegardé en lieu sûr (perte = perte d'accès au wallet)
+- Ne jamais commiter `.env`, `*.enc`, ou tout fichier contenant des secrets
+- Ce bot ne gère pas encore la liquidation — configurer le levier avec prudence

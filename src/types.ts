@@ -1,7 +1,8 @@
 // ─────────────────────────────────────────────────────────────
-// Types & interfaces du bot de hedging DeepBook
+// Types & interfaces — DeepBook Hedging Bot v2
 // ─────────────────────────────────────────────────────────────
 
+// ── Erreurs ──────────────────────────────────────────────────
 export class HedgingError extends Error {
   code: string;
   retryable: boolean;
@@ -16,6 +17,7 @@ export class HedgingError extends Error {
   }
 }
 
+// ── Configuration ─────────────────────────────────────────────
 export interface PoolConfig {
   id: string;
   baseSymbol: string;
@@ -33,8 +35,21 @@ export interface HedgingConfig {
   retryDelayBaseMs: number;
   cacheTtlMs: number;
   indexerUrl: string;
+  // Sécurité clés
+  keystorePath: string;
+  // Métriques
+  metricsPort: number;
+  metricsEnabled: boolean;
+  // Alertes
+  alertTelegramToken: string;
+  alertTelegramChatId: string;
+  alertDiscordWebhook: string;
+  alertMinSeverity: AlertSeverity;
+  // Slippage
+  maxSlippagePct: number;
 }
 
+// ── Pools ─────────────────────────────────────────────────────
 export interface LoadedPool {
   id: string;
   baseType: string;
@@ -48,10 +63,41 @@ export interface LoadedPool {
 
 export type PoolMap = Map<string, LoadedPool>;
 
+// ── Delta ─────────────────────────────────────────────────────
 export interface DeltaCache {
   delta: number;
+  rawDelta: number;        // delta brut (en unités de base)
+  pricedDelta: number;     // delta valorisé en USD/USDC
+  openOrdersDelta: number; // contribution des ordres ouverts
+  midPrice: number;        // prix mid au moment du calcul
   timestamp: number;
   poolId: string;
+}
+
+export interface OpenOrder {
+  orderId: string;
+  isBid: boolean;
+  price: number;
+  quantity: number;
+  filledQuantity: number;
+}
+
+export interface PreciseDelta {
+  rawDelta: number;
+  openOrdersDelta: number;
+  netDelta: number;
+  pricedDelta: number;
+  midPrice: number;
+  openOrders: OpenOrder[];
+}
+
+// ── Hedging ───────────────────────────────────────────────────
+export type HedgeAction = 'buy' | 'sell' | 'none';
+
+export interface HedgeDecision {
+  action: HedgeAction;
+  quantity: number;
+  reason: string;
 }
 
 export interface AppContext {
@@ -60,16 +106,31 @@ export interface AppContext {
   client: import('@mysten/sui/client').SuiClient;
 }
 
+// ── Stats & monitoring ────────────────────────────────────────
 export interface ErrorStats {
   count: number;
   lastError: HedgingError | null;
   consecutiveFailures: number;
 }
 
-export type HedgeAction = 'buy' | 'sell' | 'none';
-
-export interface HedgeDecision {
+export interface TradeRecord {
+  poolId: string;
   action: HedgeAction;
   quantity: number;
-  reason: string;
+  delta: number;
+  pricedDelta: number;
+  digest: string;
+  timestamp: number;
+  dryRunPassed: boolean;
+}
+
+// ── Alertes ───────────────────────────────────────────────────
+export type AlertSeverity = 'info' | 'warn' | 'critical';
+
+export interface Alert {
+  severity: AlertSeverity;
+  title: string;
+  message: string;
+  context?: Record<string, unknown>;
+  timestamp: number;
 }

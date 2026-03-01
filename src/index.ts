@@ -1,40 +1,51 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 
-import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
+import { getFullnodeUrl }         from '@mysten/sui/client';
 
-import { CONFIG }             from './config.js';
-import { logger }             from './utils/logger.js';
-import { loadDeepBookPools }  from './utils/pools.js';
-import { db, client, keypair, walletAddress } from './utils/sui.js';
-import { hedgeAllPools, getErrorStats }       from './core/hedging.js';
-import type { AppContext }    from './types.js';
+import { CONFIG }                 from './config.js';
+import { logger }                 from './utils/logger.js';
+import { loadDeepBookPools }      from './utils/pools.js';
+import { initClients, client, db, walletAddress, getWalletBalanceSui } from './utils/sui.js';
+import { startMetricsServer, stopMetricsServer, metrics } from './utils/metrics.js';
+import { alerts }                 from './utils/alerts.js';
+import { hedgeAllPools, getErrorStats } from './core/hedging.js';
+import type { AppContext }         from './types.js';
 
-// ─── Contexte global de l'application ────────────────────────
-const ctx: AppContext = {
-  address: walletAddress,
-  db,
-  client,
-};
+// ── Contexte global ───────────────────────────────────────────
+let ctx: AppContext;
 
-// ─── WebSocket de surveillance (reconnexion automatique) ──────
+// ── Surveillance du solde ─────────────────────────────────────
+const LOW_BALANCE_THRESHOLD_SUI = 0.5;
+
+async function checkWalletBalance(): Promise<void> {
+  try {
+    const balance = await getWalletBalanceSui();
+    metrics.setWalletBalance(balance);
+
+    if (balance < LOW_BALANCE_THRESHOLD_SUI) {
+      await alerts.lowWalletBalance(balance);
+    }
+  } catch (err) {
+    logger.warn('Impossible de lire le solde du wallet', {
+      error: (err as Error).message,
+    });
+  }
+}
+
+// ── WebSocket (reconnexion automatique) ───────────────────────
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function setupWebSocket(): void {
-  const wsUrl = (process.env.RPC_URL ?? getFullnodeUrl('mainnet'))
-    .replace('https://', 'wss://')
-    .replace('http://',  'ws://');
-
-  logger.info('Connexion WebSocket...', { url: wsUrl });
+  logger.info('Connexion WebSocket aux events DeepBook...');
 
   try {
-    // Sui fournit une API d'abonnement aux events via SuiClient
-    // On souscrit aux events DeepBook pour réagir en temps réel
-    const unsubscribe = client.subscribeEvent({
-      filter: { Package: '0x000000000000000000000000000000000000000000000000000000000000dee9' },
+    const unsubscribePromise = client.subscribeEvent({
+      filter: {
+        Package: '0x000000000000000000000000000000000000000000000000000000000000dee9',
+      },
       onMessage: (event) => {
         logger.info('Event DeepBook reçu', { type: event.type });
-        // Déclenche un cycle de hedging immédiat sur réception d'un event
         hedgeAllPools(ctx).catch((err) =>
           logger.error('Erreur hedging sur event WS', { err: (err as Error).message })
         );
@@ -43,31 +54,48 @@ function setupWebSocket(): void {
 
     logger.info('WebSocket abonné aux events DeepBook');
 
-    // Nettoyage propre à l'arrêt
-    process.once('SIGINT',  () => { unsubscribe.then?.(() => void 0); process.exit(0); });
-    process.once('SIGTERM', () => { unsubscribe.then?.(() => void 0); process.exit(0); });
+    const cleanup = async (): Promise<void> => {
+      try {
+        const unsub = await unsubscribePromise;
+        if (typeof unsub === 'function') unsub();
+      } catch { /* ignore */ }
+    };
+
+    process.once('SIGINT',  () => { void cleanup().then(() => process.exit(0)); });
+    process.once('SIGTERM', () => { void cleanup().then(() => process.exit(0)); });
 
   } catch (err) {
-    logger.warn('WebSocket indisponible, utilisation du polling uniquement', {
+    logger.warn('WebSocket indisponible → polling seulement', {
       error: (err as Error).message,
     });
-
-    // Reconnexion après délai configurable
     if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
     wsReconnectTimer = setTimeout(setupWebSocket, CONFIG.wsReconnectDelayMs);
   }
 }
 
-// ─── Point d'entrée principal ─────────────────────────────────
+// ── Arrêt propre ──────────────────────────────────────────────
+async function gracefulShutdown(signal: string): Promise<void> {
+  logger.info(`Signal ${signal} reçu → arrêt propre`);
+  await alerts.botStopped(`Signal ${signal}`);
+  await stopMetricsServer();
+  process.exit(0);
+}
+
+// ── Point d'entrée ────────────────────────────────────────────
 async function main(): Promise<void> {
-  logger.info('Démarrage bot hedging DeepBook', {
-    wallet:  walletAddress.slice(0, 10) + '...',
-    network: process.env.RPC_URL ?? 'mainnet (défaut)',
+  // 1. Initialiser les clients (keystore ou .env)
+  await initClients();
+
+  ctx = { address: walletAddress, db, client };
+
+  logger.info('Démarrage bot hedging DeepBook v2', {
+    wallet:  walletAddress.slice(0, 12) + '...',
+    network: process.env.SUI_ENV ?? 'mainnet',
   });
 
-  // 1. Charger et résoudre les pools
+  // 2. Charger et résoudre les pools
   const poolsMap = await loadDeepBookPools();
-  CONFIG.pools = Array.from(poolsMap.values()).map((p) => ({
+  CONFIG.pools   = Array.from(poolsMap.values()).map((p) => ({
     id:          p.id,
     baseSymbol:  p.baseSymbol,
     quoteSymbol: p.quoteSymbol,
@@ -77,23 +105,38 @@ async function main(): Promise<void> {
     pools: CONFIG.pools.map((p) => `${p.baseSymbol}/${p.quoteSymbol} → ${p.id.slice(0, 8)}...`),
   });
 
-  // 2. Premier cycle immédiat
+  // 3. Démarrer le serveur de métriques
+  startMetricsServer();
+
+  // 4. Alerte démarrage
+  await alerts.botStarted(
+    walletAddress.slice(0, 12) + '...',
+    CONFIG.pools.map((p) => `${p.baseSymbol}/${p.quoteSymbol}`)
+  );
+
+  // 5. Vérification initiale du solde
+  await checkWalletBalance();
+
+  // 6. Premier cycle immédiat
   await hedgeAllPools(ctx);
 
-  // 3. Abonnement WebSocket pour réactivité temps-réel
+  // 7. WebSocket temps-réel
   setupWebSocket();
 
-  // 4. Polling de secours périodique
+  // 8. Polling de secours
   setInterval(async () => {
     logger.info('[POLL] Vérification périodique');
     await hedgeAllPools(ctx);
   }, CONFIG.checkIntervalMs);
 
-  // 5. Monitoring des erreurs toutes les 10 min
+  // 9. Vérification du solde toutes les 5 min
+  setInterval(() => { void checkWalletBalance(); }, 5 * 60_000);
+
+  // 10. Rapport d'erreurs toutes les 10 min
   setInterval(() => {
     const stats = getErrorStats();
     if (stats.count > 0) {
-      logger.warn('Statistiques erreurs', {
+      logger.warn('Rapport erreurs', {
         total:       stats.count,
         consecutive: stats.consecutiveFailures,
         last:        stats.lastError?.message,
@@ -102,7 +145,10 @@ async function main(): Promise<void> {
   }, 600_000);
 }
 
-// ─── Gestionnaires d'erreurs globaux ─────────────────────────
+// ── Gestionnaires globaux ─────────────────────────────────────
+process.on('SIGINT',  () => { void gracefulShutdown('SIGINT'); });
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+
 process.on('uncaughtException', (err) => {
   logger.error('Exception non capturée', { message: err.message, stack: err.stack });
   process.exit(1);

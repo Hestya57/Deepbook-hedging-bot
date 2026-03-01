@@ -1,114 +1,81 @@
-import { Transaction } from '@mysten/sui/transactions';
+import { Transaction }                   from '@mysten/sui/transactions';
 
-import { CONFIG }                           from '../config.js';
-import { HedgingError }                     from '../types.js';
+import { CONFIG }                         from '../config.js';
+import { HedgingError }                   from '../types.js';
 import type { AppContext, ErrorStats, HedgeDecision, DeltaCache } from '../types.js';
-import { executeSafe, normalizeError }      from '../utils/sui.js';
-import { logger }                           from '../utils/logger.js';
+import { executeSafe, normalizeError }    from '../utils/sui.js';
+import { logger }                         from '../utils/logger.js';
+import { metrics }                        from '../utils/metrics.js';
+import { alerts }                         from '../utils/alerts.js';
+import { computePreciseDelta }            from './delta.js';
 
-// ─── État interne du module ───────────────────────────────────
+// ── État interne ──────────────────────────────────────────────
 const deltaCache  = new Map<string, DeltaCache>();
 const errorStats: ErrorStats = { count: 0, lastError: null, consecutiveFailures: 0 };
 const MAX_CONSECUTIVE_ERRORS = 5;
 
-// ─── Récupération de la position nette via l'indexer ─────────
-async function getPositionFromIndexer(poolId: string, address: string): Promise<number> {
-  const query = `
-    query {
-      position(poolId: "${poolId}", owner: "${address}") {
-        base_quantity
-        quote_quantity
-      }
-    }
-  `;
-
-  const response = await fetch(CONFIG.indexerUrl, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ query }),
-  });
-
-  if (!response.ok) {
-    throw new HedgingError(
-      `Indexer HTTP ${response.status}`,
-      'NETWORK',
-      true
-    );
-  }
-
-  const json = await response.json() as {
-    data?: { position?: { base_quantity?: string; quote_quantity?: string } };
-    errors?: unknown[];
-  };
-
-  if (json.errors?.length) {
-    throw new HedgingError('Erreur GraphQL indexer', 'INDEXER', true, json.errors);
-  }
-
-  // Delta = quantité base nette (positif → long, négatif → short)
-  const baseQty = Number(json.data?.position?.base_quantity ?? 0);
-  return baseQty;
-}
-
-// ─── Cache delta ──────────────────────────────────────────────
-export async function getCachedDelta(poolId: string, ctx: AppContext): Promise<number> {
+// ── Cache delta ───────────────────────────────────────────────
+export async function getCachedDelta(poolId: string, ctx: AppContext): Promise<DeltaCache> {
   const cached = deltaCache.get(poolId);
   if (cached && Date.now() - cached.timestamp < CONFIG.cacheTtlMs) {
     logger.info(`Cache hit delta ${poolId.slice(0, 8)}...`, { delta: cached.delta });
-    return cached.delta;
+    return cached;
   }
 
-  try {
-    const delta = await getPositionFromIndexer(poolId, ctx.address);
-    deltaCache.set(poolId, { delta, timestamp: Date.now(), poolId });
-    return delta;
-  } catch (err) {
-    logger.warn('Indexer indisponible → SDK fallback', { poolId });
-    try {
-      // Fallback SDK : getLevel2 pour estimer la position ouverte
-      const book = await ctx.db.getLevel2Order(poolId, BigInt(1), BigInt(1), true);
-      // En l'absence d'un endpoint de position directe dans le SDK public,
-      // on retourne 0 (aucune position connue) — à adapter selon votre usage.
-      const delta = book ? 0 : 0;
-      deltaCache.set(poolId, { delta, timestamp: Date.now(), poolId });
-      return delta;
-    } catch (sdkErr) {
-      throw new HedgingError(
-        'Impossible de récupérer la position (indexer + SDK)',
-        'POSITION_FETCH',
-        false,
-        { poolId, original: (err as Error).message }
-      );
-    }
-  }
+  // Calcul précis : position + ordres ouverts + prix mid
+  const precise = await computePreciseDelta(poolId, ctx);
+
+  const entry: DeltaCache = {
+    delta:           precise.netDelta,
+    rawDelta:        precise.rawDelta,
+    pricedDelta:     precise.pricedDelta,
+    openOrdersDelta: precise.openOrdersDelta,
+    midPrice:        precise.midPrice,
+    timestamp:       Date.now(),
+    poolId,
+  };
+
+  deltaCache.set(poolId, entry);
+
+  // Mise à jour métriques
+  metrics.setDelta(poolId, precise.netDelta, precise.pricedDelta);
+
+  return entry;
 }
 
-// ─── Décision de hedging ──────────────────────────────────────
+// ── Décision de hedging ───────────────────────────────────────
 export function decideHedging(delta: number, poolId: string): HedgeDecision {
   const absD = Math.abs(delta);
 
   if (absD < CONFIG.deltaThreshold) {
-    return { action: 'none', quantity: 0, reason: `Delta ${delta.toFixed(2)} sous le seuil ${CONFIG.deltaThreshold}` };
+    return {
+      action:   'none',
+      quantity: 0,
+      reason:   `Delta ${delta.toFixed(4)} sous le seuil ${CONFIG.deltaThreshold}`,
+    };
   }
 
-  const quantity = CONFIG.orderSizeBase * CONFIG.leverage;
+  // La quantité à hedger = la moitié de l'excès × levier
+  // (on vise à revenir sous le seuil, pas forcément à zéro)
+  const excess   = absD - CONFIG.deltaThreshold;
+  const quantity = Math.min(excess, CONFIG.orderSizeBase) * CONFIG.leverage;
 
   if (delta > 0) {
     return {
       action:   'sell',
       quantity,
-      reason:   `Delta long ${delta.toFixed(2)} → vente de ${quantity} pour neutraliser`,
+      reason:   `Delta long ${delta.toFixed(4)} → SELL ${quantity.toFixed(4)} pour neutraliser`,
     };
   }
 
   return {
     action:   'buy',
     quantity,
-    reason:   `Delta short ${delta.toFixed(2)} → achat de ${quantity} pour neutraliser`,
+    reason:   `Delta short ${delta.toFixed(4)} → BUY ${quantity.toFixed(4)} pour neutraliser`,
   };
 }
 
-// ─── Construction de l'ordre de marché DeepBook ──────────────
+// ── Construction de l'ordre ───────────────────────────────────
 function buildMarketOrderTx(
   ctx: AppContext,
   poolId: string,
@@ -116,91 +83,91 @@ function buildMarketOrderTx(
 ): Transaction {
   const tx = new Transaction();
 
-  // Appel à la fonction place_market_order du contrat DeepBook
-  // La signature exacte dépend de la version du contrat déployé.
-  // Adaptez pool_key, base_coin, quote_coin selon votre contexte.
-  if (decision.action === 'buy') {
-    ctx.db.placeLimitOrder(
-      {
-        poolKey:       poolId,
-        balanceManagerKey: 'MANAGER',
-        clientOrderId: Date.now(),
-        price:         0,            // 0 = market order
-        quantity:      BigInt(Math.round(decision.quantity * 1e9)),
-        isBid:         true,
-        expiration:    BigInt(0),
-        orderType:     0,           // MARKET
-        selfMatchingOption: 0,
-        payWithDeep:   true,
-      },
-      tx
-    );
-  } else {
-    ctx.db.placeLimitOrder(
-      {
-        poolKey:       poolId,
-        balanceManagerKey: 'MANAGER',
-        clientOrderId: Date.now(),
-        price:         0,
-        quantity:      BigInt(Math.round(decision.quantity * 1e9)),
-        isBid:         false,
-        expiration:    BigInt(0),
-        orderType:     0,
-        selfMatchingOption: 0,
-        payWithDeep:   true,
-      },
-      tx
-    );
-  }
+  ctx.db.placeLimitOrder(
+    {
+      poolKey:            poolId,
+      balanceManagerKey:  'MANAGER',
+      clientOrderId:      Date.now(),
+      price:              0,                 // 0 = exécution au marché
+      quantity:           BigInt(Math.round(decision.quantity * 1e9)),
+      isBid:              decision.action === 'buy',
+      expiration:         BigInt(0),
+      orderType:          0,                 // MARKET
+      selfMatchingOption: 0,
+      payWithDeep:        true,
+    },
+    tx
+  );
 
   return tx;
 }
 
-// ─── Hedge d'un pool ──────────────────────────────────────────
+// ── Hedge d'un pool ───────────────────────────────────────────
 export async function hedgePosition(poolId: string, ctx: AppContext): Promise<void> {
+  const start = Date.now();
+
   try {
-    const delta    = await getCachedDelta(poolId, ctx);
-    const decision = decideHedging(delta, poolId);
+    // 1. Delta précis (avec cache)
+    const deltaEntry = await getCachedDelta(poolId, ctx);
+    const decision   = decideHedging(deltaEntry.delta, poolId);
 
     logger.info('Analyse hedging', {
       pool:     poolId.slice(0, 8),
-      delta:    delta.toFixed(2),
+      delta:    deltaEntry.delta.toFixed(4),
+      priced:   `${deltaEntry.pricedDelta.toFixed(2)} USD`,
+      midPrice: deltaEntry.midPrice.toFixed(4),
       decision: decision.action,
       reason:   decision.reason,
     });
 
-    if (decision.action === 'none') return;
+    if (decision.action === 'none') {
+      metrics.setCycleTimestamp(poolId);
+      return;
+    }
 
+    // 2. Construction de la transaction
     const tx = buildMarketOrderTx(ctx, poolId, decision);
+
+    // 3. Envoi avec dryRun automatique dans executeSafe
     await executeSafe(tx);
 
-    // Invalider le cache après un ordre exécuté
-    deltaCache.delete(poolId);
+    // 4. Succès : mise à jour des métriques et alertes
+    const durationMs = Date.now() - start;
+    metrics.recordOrder(poolId, decision.action);
+    metrics.setTxDuration(poolId, durationMs);
+    metrics.setCycleTimestamp(poolId);
+
+    deltaCache.delete(poolId);  // invalider le cache
     errorStats.consecutiveFailures = 0;
+
+    await alerts.hedgeExecuted(poolId, decision.action, decision.quantity, deltaEntry.delta);
 
   } catch (err) {
     const error = err instanceof HedgingError ? err : normalizeError(err);
 
     errorStats.count++;
-    errorStats.lastError         = error;
+    errorStats.lastError           = error;
     errorStats.consecutiveFailures++;
+
+    metrics.recordError(poolId, error.code);
+    metrics.setConsecutiveFailures(errorStats.consecutiveFailures);
 
     logger.error(error, { poolId });
 
     if (errorStats.consecutiveFailures >= MAX_CONSECUTIVE_ERRORS) {
+      await alerts.tooManyErrors(
+        errorStats.consecutiveFailures,
+        error.message
+      );
       logger.error(
         `Trop d'erreurs consécutives (${errorStats.consecutiveFailures}/${MAX_CONSECUTIVE_ERRORS}) → arrêt`
       );
       process.exit(1);
     }
-
-    if (!error.retryable) {
-      logger.warn(`Erreur non-retriable sur le pool ${poolId.slice(0, 8)}, pool ignoré ce cycle.`);
-    }
   }
 }
 
-// ─── Hedge de tous les pools ──────────────────────────────────
+// ── Hedge de tous les pools ───────────────────────────────────
 export async function hedgeAllPools(ctx: AppContext): Promise<void> {
   logger.info('Début cycle hedging multi-pools');
 
@@ -210,14 +177,14 @@ export async function hedgeAllPools(ctx: AppContext): Promise<void> {
 
   results.forEach((r, i) => {
     if (r.status === 'rejected') {
-      logger.warn(`Pool ${CONFIG.pools[i]?.id.slice(0, 8) ?? '?'}... a échoué`, {
+      logger.warn(`Pool ${CONFIG.pools[i]?.id.slice(0, 8) ?? '?'} a échoué`, {
         reason: (r.reason as Error)?.message,
       });
     }
   });
 }
 
-// ─── Export stats pour monitoring ────────────────────────────
+// ── Export stats ──────────────────────────────────────────────
 export function getErrorStats(): Readonly<ErrorStats> {
   return errorStats;
 }

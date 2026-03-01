@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    // Sorties
+    "rootDir": "./src",
+    "outDir": "./dist",
+
+    // Environnement
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "esnext",
+
+    // Autres sorties
+    "sourceMap": true,
+    "declaration": true,
+    "declarationMap": true,
+
+    // Vérifications strictes
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+
+    // Options recommandées
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+
+    // Supprimé : jsx (pas de React dans ce projet)
+    "lib": ["esnext"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

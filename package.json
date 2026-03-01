@@ -1,0 +1,28 @@
+{
+  "name": "deepbook-hedging-bot",
+  "version": "1.0.0",
+  "description": "Bot de hedging delta-neutral sur DeepBook (Sui)",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build":   "tsc",
+    "start":   "node dist/index.js",
+    "dev":     "ts-node --esm src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["sui", "deepbook", "hedging", "bot"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@mysten/deepbook-v3": "^0.28.3",
+    "@mysten/sui": "^1.45.2",
+    "axios": "^1.13.6",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
